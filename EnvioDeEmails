@@ -1,0 +1,302 @@
+/**
+ * Adicionada para formatar datas de forma consistente, retornando 'N/A' se a data for inválida ou vazia.
+ */
+function formatarDataParaEmail(dataValor) {
+  if (dataValor instanceof Date && !isNaN(dataValor.getTime())) {
+    return Utilities.formatDate(dataValor, Session.getScriptTimeZone(), "dd/MM/yyyy");
+  }
+  if (dataValor) {
+    return dataValor.toString().trim();
+  }
+  return 'N/A';
+}
+
+/**
+ * Função "filtro" que recebe uma string de e-mails separados por vírgula
+ * e retorna uma nova string contendo apenas os e-mails com formato válido.
+ */
+function limparStringDeEmails(stringEmails) {
+  if (!stringEmails || typeof stringEmails !== 'string') {
+    return '';
+  }
+  
+  const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  
+  const emailsIndividuais = stringEmails.split(',');
+  
+  const emailsValidos = emailsIndividuais
+    .map(email => email.trim())
+    .filter(email => emailRegex.test(email));
+    
+  return emailsValidos.join(',');
+}
+
+
+/**
+ * Função "worker" que processa UMA ÚNICA aba, envia os e-mails e retorna a contagem.
+ * O mapeamento de colunas para "Alteração de PBM" foi ajustado para corresponder à planilha.
+ */
+function enviarEmailsPorAba(nomeAba, bandeiraFiltro) {
+  const spreadsheet = SpreadsheetApp.openById("1GDjpgOJsxzKwmu5spOQK0szRoPWUXYhBj2dBg6toQi8");
+  const sheet = spreadsheet.getSheetByName(nomeAba);
+  
+  if (!sheet) {
+    throw new Error(`A aba "${nomeAba}" não foi encontrada. O processo foi interrompido.`);
+  }
+  
+  let colunasConfig;
+
+  if (nomeAba === 'Leve e Pague C&V') {
+    colunasConfig = {
+      STATUS: 1, ID: 3, EMAIL: 4, EMAIL_COPIA: 5, RESPOSTA: 2,
+      DATA_INICIO: 6, DATA_FIM: 7, SKU: 8, NOM_SKU: 9, DINAMICA_ACAO: 10,
+      DATA_SOLICITACAO: 13
+    };
+  } else if (nomeAba === 'Leve e Pague LB') {
+    colunasConfig = {
+      STATUS: 1, ID: 3, EMAIL: 4, EMAIL_COPIA: 5, RESPOSTA: 2,
+      DATA_INICIO: 6, DATA_FIM: 7, SKU: 8, NOM_SKU: 9, DINAMICA_ACAO: 11,
+      DATA_SOLICITACAO: 14
+    };
+  } else if (nomeAba === 'Alteração de PBM') {
+    // ===== CORREÇÃO PRINCIPAL AQUI =====
+    colunasConfig = {
+      STATUS: 1, ID: 3, EMAIL: 4, EMAIL_COPIA: 5, RESPOSTA: 2,
+      SKU: 6, PRECO_REGULAR: 7, PRECO_PROMO: 8, PRECO_SUPER_PROMO: 9,
+      BANDEIRA: 11, // Corrigido para Coluna K
+      DATA_SOLICITACAO: 12 // Corrigido para Coluna L
+    };
+    // ===================================
+  } else {
+    // Configuração padrão para as outras abas
+    colunasConfig = {
+      STATUS: 1, ID: 3, EMAIL: 4, EMAIL_COPIA: 5, RESPOSTA: 2,
+      SKU: 6, PRECO_SOLICITADO: 7, DATA_INICIO: 14, DATA_FIM: 15,
+      NOM_SKU: 17, DATA_SOLICITACAO: 13
+    };
+  }
+  
+  const COR_FUNDO_VERDE = '#b7e1cd';
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < 2) {
+    Logger.log(`A aba "${nomeAba}" está vazia. Nenhum e-mail para enviar.`);
+    return 0;
+  }
+  
+  const maxColumn = Math.max(...Object.values(colunasConfig));
+  const dataRange = sheet.getRange(2, 1, lastRow - 1, maxColumn);
+  const backgrounds = sheet.getRange(2, colunasConfig.STATUS, lastRow - 1, 1).getBackgrounds();
+  const data = dataRange.getValues();
+  
+  let emailsEnviados = 0;
+  const registrosUnicos = new Map();
+  
+  data.forEach((row, index) => {
+    const linha = index + 2;
+    const status = row[colunasConfig.STATUS - 1]?.toString().trim().toUpperCase();
+    const email = row[colunasConfig.EMAIL - 1]?.toString().trim();
+    const fundoCelula = backgrounds[index][0];
+
+    if (fundoCelula !== COR_FUNDO_VERDE && email && email.includes('@') && ['EM ANDAMENTO', 'CONCLUÍDA', 'INVÁLIDA'].includes(status)) {
+      
+      let bandeiraDaLinha = ''; 
+      if (nomeAba === 'Alteração de PBM') {
+        bandeiraDaLinha = row[colunasConfig.BANDEIRA - 1]?.toString().trim() || '';
+        const bandeiraUpper = bandeiraDaLinha.toUpperCase();
+
+        if (bandeiraFiltro === 'CV' && !['C&V', 'CVLB'].includes(bandeiraUpper)) return;
+        if (bandeiraFiltro === 'LB' && !['LB', 'CVLB'].includes(bandeiraUpper)) return;
+      }
+
+      const resposta = row[colunasConfig.RESPOSTA - 1]?.toString().trim();
+      const id = row[colunasConfig.ID - 1]?.toString().trim();
+      const dataSolicitacaoRaw = row[colunasConfig.DATA_SOLICITACAO - 1];
+      
+      const emailCopiaBruto = row[colunasConfig.EMAIL_COPIA - 1]?.toString().trim();
+      const emailCopiaLimpo = limparStringDeEmails(emailCopiaBruto);
+      
+      const dataFormatada = formatarDataParaEmail(dataSolicitacaoRaw);
+      
+      const sku = row[colunasConfig.SKU - 1] || 'Não informado';
+      const nomSku = row[(colunasConfig.NOM_SKU || 0) - 1] || 'Não informado';
+      const precoSolicitado = row[(colunasConfig.PRECO_SOLICITADO || 0) - 1] || 'Não informado';
+      const dinamicaAcao = row[(colunasConfig.DINAMICA_ACAO || 0) - 1] || 'Não informado';
+      const precoRegular = row[(colunasConfig.PRECO_REGULAR || 0) - 1] || 'N/A';
+      const precoPromo = row[(colunasConfig.PRECO_PROMO || 0) - 1] || 'N/A';
+      const precoSuperPromo = row[(colunasConfig.PRECO_SUPER_PROMO || 0) - 1] || 'N/A';
+      const dataInicio = formatarDataParaEmail(row[(colunasConfig.DATA_INICIO || 0) - 1]);
+      const dataFim = formatarDataParaEmail(row[(colunasConfig.DATA_FIM || 0) - 1]);
+
+      const registroKey = `${email}_${status}_${dataFormatada}_${resposta}_${id}`;
+      
+      if (!registrosUnicos.has(registroKey)) {
+        registrosUnicos.set(registroKey, {
+          email: email, 
+          emailCopia: emailCopiaLimpo,
+          status: status, 
+          resposta: resposta,
+          data: dataFormatada, 
+          id: id, 
+          linhas: [], 
+          itens: []
+        });
+      }
+      
+      const registroAtual = registrosUnicos.get(registroKey);
+      registroAtual.linhas.push(linha);
+      registroAtual.itens.push({
+        sku: sku, nomSku: nomSku, preco: precoSolicitado, dinamica: dinamicaAcao,
+        inicio: dataInicio, fim: dataFim,
+        pbmRegular: precoRegular, pbmPromo: precoPromo, pbmSuperPromo: precoSuperPromo,
+        bandeira: bandeiraDaLinha || 'N/A'
+      });
+    }
+  });
+  
+  registrosUnicos.forEach((registro, key) => {
+    let htmlBody = `<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6;"><p>Olá,</p><p>Sua solicitação ID <b>${registro.id}</b>, enviada no dia <b>${registro.data}</b>, foi atualizada para o status: <b>${registro.status}</b>.</p>`;
+    if (registro.resposta) {
+      const respostaFormatada = registro.resposta.replace(/\n/g, '<br>');
+      htmlBody += `<p><b>Resposta do Processamento:</b></p><p style="background-color: #f4f4f4; border-left: 5px solid #ccc; padding: 10px; margin: 10px 0;">${respostaFormatada}</p>`;
+    }
+    htmlBody += `<hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;"><p><b>Detalhes dos itens nesta notificação:</b></p>`;
+    
+    registro.itens.forEach(item => {
+      let detalhesItem;
+      if (nomeAba === 'Alteração de PBM') {
+        detalhesItem = `
+          <b>Preço Regular:</b> ${item.pbmRegular}<br>
+          <b>Preço Promo:</b> ${item.pbmPromo}<br>
+          <b>Preço Super Promo:</b> ${item.pbmSuperPromo}<br>
+          <b>Bandeira:</b> ${item.bandeira}<br>
+        `;
+      } else if (nomeAba === 'Leve e Pague C&V' || nomeAba === 'Leve e Pague LB') {
+        detalhesItem = `
+          <b>NOM_SKU:</b> ${item.nomSku}<br>
+          <b>Dinâmica da Ação:</b> ${item.dinamica}<br>
+          <b>Data Início:</b> ${item.inicio}<br>
+          <b>Data Fim:</b> ${item.fim}
+        `;
+      } else {
+        detalhesItem = `
+          <b>NOM_SKU:</b> ${item.nomSku}<br>
+          <b>Preço Solicitado:</b> ${item.preco}<br>
+          <b>Data Início:</b> ${item.inicio}<br>
+          <b>Data Fim:</b> ${item.fim}
+        `;
+      }
+
+      htmlBody += `
+        <div style="border: 1px solid #ddd; border-radius: 5px; padding: 15px; margin-bottom: 15px;">
+          <b>SKU:</b> ${item.sku}<br>
+          ${detalhesItem}
+        </div>
+      `;
+    });
+
+    htmlBody += `<br><p>Atenciosamente,<br>Pricing</p></div>`;
+    
+    const mailOptions = {
+      to: registro.email,
+      subject: `Status da Solicitação ID ${registro.id} - ${registro.data} (${nomeAba})`,
+      htmlBody: htmlBody
+    };
+
+    if (registro.emailCopia) {
+      mailOptions.cc = registro.emailCopia;
+    }
+
+    MailApp.sendEmail(mailOptions);
+    emailsEnviados++;
+    
+    registro.linhas.forEach(linha => {
+      sheet.getRange(linha, colunasConfig.STATUS).setBackground(COR_FUNDO_VERDE);
+    });
+    
+    Utilities.sleep(500);
+  });
+
+  Logger.log(`${emailsEnviados} e-mails enviados para a aba "${nomeAba}".`);
+  return emailsEnviados;
+}
+
+
+/**
+ * Função "controladora" para o menu CV.
+ */
+function enviarEmailsCV() {
+  const abasParaProcessar = ['CV', 'Leve e Pague C&V', 'Alteração de PBM'];
+  let totalEmailsEnviados = 0;
+  let relatorio = 'Relatório de Envio:\n\n';
+
+  try {
+    SpreadsheetApp.getUi().alert('O processo de envio para as abas CV será iniciado. Por favor, aguarde o relatório final.');
+
+    for (const nomeAba of abasParaProcessar) {
+      try {
+        const emailsNestaAba = enviarEmailsPorAba(nomeAba, 'CV');
+        totalEmailsEnviados += emailsNestaAba;
+        relatorio += `- Aba "${nomeAba}": ${emailsNestaAba} e-mails enviados.\n`;
+      } catch (e) {
+        relatorio += `- Aba "${nomeAba}": FALHA AO PROCESSAR. Erro: ${e.message}\n`;
+      }
+    }
+    
+    SpreadsheetApp.getUi().alert(
+      'Processo Concluído',
+      relatorio + `\nTotal: ${totalEmailsEnviados} e-mails enviados.`,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+
+  } catch (error) {
+    Logger.log(error);
+    SpreadsheetApp.getUi().alert('Erro Crítico', error.message);
+  }
+}
+
+
+/**
+ * Função "controladora" para o menu LB.
+ */
+function enviarEmailsLB() {
+  const abasParaProcessar = ['LB', 'Leve e Pague LB', 'Alteração de PBM'];
+  let totalEmailsEnviados = 0;
+  let relatorio = 'Relatório de Envio:\n\n';
+
+  try {
+    SpreadsheetApp.getUi().alert('O processo de envio para as abas LB será iniciado. Por favor, aguarde o relatório final.');
+
+    for (const nomeAba of abasParaProcessar) {
+      try {
+        const emailsNestaAba = enviarEmailsPorAba(nomeAba, 'LB');
+        totalEmailsEnviados += emailsNestaAba;
+        relatorio += `- Aba "${nomeAba}": ${emailsNestaAba} e-mails enviados.\n`;
+      } catch (e) {
+        relatorio += `- Aba "${nomeAba}": FALHA AO PROCESSAR. Erro: ${e.message}\n`;
+      }
+    }
+
+    SpreadsheetApp.getUi().alert(
+      'Processo Concluído',
+      relatorio + `\nTotal: ${totalEmailsEnviados} e-mails enviados.`,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+
+  } catch (error) {
+    Logger.log(error);
+    SpreadsheetApp.getUi().alert('Erro Crítico', error.message);
+  }
+}
+
+
+/**
+ * Cria o menu personalizado na planilha ao abri-la.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Envio de Status')
+    .addItem('Enviar e-mails para CV', 'enviarEmailsCV')
+    .addItem('Enviar e-mails para LB', 'enviarEmailsLB')
+    .addToUi();
+}
