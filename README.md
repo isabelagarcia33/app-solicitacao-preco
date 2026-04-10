@@ -82,3 +82,11 @@ Google Apps Script
   - envio de e-mails automáticos
         ↓
 Solicitante recebe atualização
+
+
+### Entrada das Solicitações
+
+Interface utilizada pela área comercial para registro das demandas de pricing.
+As solicitações são padronizadas e armazenadas em base estruturada para processamento automatizado.
+
+![Entrada do App](docs/entrada-app.png)
